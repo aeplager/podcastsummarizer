@@ -24,6 +24,38 @@ docker rm podcastsummarizer ; docker build -t podcastsummarizer . ; if ($LASTEXI
 
 ## API Endpoints
 
+### Search Endpoint
+`POST /search`
+
+Search YouTube for podcasts/videos by title before downloading.
+
+**Request Body:**
+```json
+{
+  "query": "search terms for podcast",
+  "max_results": 10
+}
+```
+
+**Response:**
+```json
+{
+  "query": "search terms for podcast",
+  "results_count": 5,
+  "results": [
+    {
+      "title": "Podcast Episode Title",
+      "url": "https://www.youtube.com/watch?v=...",
+      "duration": "1:23:45",
+      "channel": "Channel Name",
+      "view_count": 12345,
+      "upload_date": "20241201",
+      "description": "Episode description..."
+    }
+  ]
+}
+```
+
 ### Convert Endpoint
 `POST /convert`
 
@@ -50,6 +82,13 @@ Returns a simple health check response.
 
 ## Example Requests
 
+**Search for podcasts:**
+```bash
+curl -X POST http://localhost:8080/search \
+     -H "Content-Type: application/json" \
+     -d '{"query": "Latent Space podcast", "max_results": 5}'
+```
+
 **Basic usage with auto-generated filename:**
 ```bash
 curl -X POST http://localhost:8080/convert \
@@ -61,7 +100,7 @@ curl -X POST http://localhost:8080/convert \
 ```bash
 curl -X POST http://localhost:8080/convert \
      -H "Content-Type: application/json" \
-     -d '{"url": "https://www.youtube.com/watch?v=FLQVlA_DNFU&t=1s", "title": "AI Video Is Eating The World Olivia and Justine Moore"}'
+     -d '{"url": "https://www.youtube.com/watch?v=FhQqBfNCQZo", "title": "Latent Space:   Gemini in 2025 and Real Time Voice"}'
 ```
 
 **Example response:**
@@ -83,6 +122,21 @@ import requests
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
+
+@app.route('/search-podcasts', methods=['POST'])
+def search_podcasts():
+    data = request.get_json()
+    
+    # Search for podcasts
+    response = requests.post('http://localhost:8080/search', json={
+        'query': data['query'],
+        'max_results': data.get('max_results', 10)
+    })
+    
+    if response.status_code == 200:
+        return jsonify(response.json())
+    else:
+        return jsonify({'error': 'Search failed'}), 500
 
 @app.route('/download-podcast', methods=['POST'])
 def download_podcast():

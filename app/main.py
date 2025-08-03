@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import tempfile
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -14,6 +15,11 @@ app = FastAPI()
 class ConvertRequest(BaseModel):
     url: str
     title: str = None  # Optional custom title for the files
+
+
+class SearchRequest(BaseModel):
+    query: str
+    max_results: int = 10  # Default to 10 results
 
 
 # Support multiple podcast platforms that allow downloads
@@ -61,6 +67,53 @@ def _sanitize_filename(title):
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+@app.post("/search")
+def search_podcasts(req: SearchRequest):
+    """Search YouTube for podcasts/videos by title"""
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Use yt-dlp to search YouTube and extract metadata without downloading
+            cmd = [
+                "yt-dlp", 
+                f"ytsearch{req.max_results}:{req.query}",
+                "--dump-json",
+                "--no-download"
+            ]
+            
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            
+            # Parse the JSON output - each line is a separate JSON object
+            search_results = []
+            for line in result.stdout.strip().split('\n'):
+                if line:
+                    try:
+                        import json
+                        video_info = json.loads(line)
+                        search_results.append({
+                            "title": video_info.get("title", "Unknown Title"),
+                            "url": video_info.get("webpage_url", ""),
+                            "duration": video_info.get("duration_string", "Unknown"),
+                            "channel": video_info.get("uploader", "Unknown Channel"),
+                            "view_count": video_info.get("view_count", 0),
+                            "upload_date": video_info.get("upload_date", "Unknown"),
+                            "description": video_info.get("description", "")[:200] + "..." if video_info.get("description", "") else ""
+                        })
+                    except json.JSONDecodeError:
+                        continue
+            
+            return {
+                "query": req.query,
+                "results_count": len(search_results),
+                "results": search_results
+            }
+            
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if exc.stderr else ""
+        raise HTTPException(status_code=500, detail=f"Search failed: {stderr}")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Search error: {str(exc)}")
 
 
 @app.post("/convert")
