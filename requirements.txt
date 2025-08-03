@@ -1,0 +1,5 @@
+fastapi
+uvicorn[standard]
+spotdl
+yt-dlp
+azure-storage-blob
