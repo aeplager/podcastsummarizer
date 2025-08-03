@@ -1,27 +1,118 @@
 # Podcast Downloader Service
 
-This service exposes an HTTP endpoint to download a Spotify podcast episode as an MP3 file and upload it to Azure Blob Storage.
+This service exposes an HTTP endpoint to download podcast episodes as MP3 files and transcriptions, uploading them to Azure Blob Storage.
 
-## Building the Docker image
+**Features:**
+- Downloads audio in MP3 format
+- Extracts transcriptions/subtitles when available
+- Uploads both to Azure Blob Storage
+- Returns URLs for both audio and transcript files
+- Optional custom file naming for better organization
 
-```bash
-docker build -t podcast-downloader .
+**Supported platforms:**
+- YouTube (podcasts and videos)
+- YouTube Music (podcasts and music)
+- Other platforms supported by yt-dlp
+
+**Note:** Spotify episodes cannot be downloaded due to DRM protection and platform restrictions.
+
+## Building and Running
+
+```powershell
+docker rm podcastsummarizer ; docker build -t podcastsummarizer . ; if ($LASTEXITCODE -eq 0) { docker run --env-file .env -p 8080:8080 podcastsummarizer }
 ```
 
-## Running the container
+## API Endpoints
 
-```bash
-docker run -e AZURE_STORAGE_ACCOUNT=... \
-           -e AZURE_STORAGE_KEY=... \
-           -e AZURE_CONTAINER_NAME=... \
-           -p 8080:8080 \
-           podcast-downloader
+### Convert Endpoint
+`POST /convert`
+
+**Request Body:**
+```json
+{
+  "url": "https://www.youtube.com/watch?v=...",
+  "title": "optional custom filename"
+}
 ```
 
-## Example request
+**Response:**
+```json
+{
+  "audio_url": "https://yourstorageaccount.blob.core.windows.net/container/filename.mp3",
+  "transcript_url": "https://yourstorageaccount.blob.core.windows.net/container/filename.vtt"
+}
+```
 
+### Health Check
+`GET /health`
+
+Returns a simple health check response.
+
+## Example Requests
+
+**Basic usage with auto-generated filename:**
 ```bash
 curl -X POST http://localhost:8080/convert \
      -H "Content-Type: application/json" \
-     -d '{"url": "https://open.spotify.com/episode/123456"}'
+     -d '{"url": "https://www.youtube.com/watch?v=FLQVlA_DNFU"}'
+```
+
+**With custom filename:**
+```bash
+curl -X POST http://localhost:8080/convert \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://www.youtube.com/watch?v=FLQVlA_DNFU&t=1s", "title": "AI Video Is Eating The World Olivia and Justine Moore"}'
+```
+
+**Example response:**
+```json
+{
+  "audio_url": "https://yourstorageaccount.blob.core.windows.net/container/My_Podcast_Episode.mp3",
+  "transcript_url": "https://yourstorageaccount.blob.core.windows.net/container/My_Podcast_Episode.vtt"
+}
+```
+
+**Note:** `transcript_url` will only be included if transcription/subtitles are available for the video.
+
+## Flask Integration
+
+This service is fully compatible with Flask applications. You can call it from any Flask route:
+
+```python
+import requests
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route('/download-podcast', methods=['POST'])
+def download_podcast():
+    data = request.get_json()
+    
+    # Call the podcast service
+    response = requests.post('http://localhost:8080/convert', json={
+        'url': data['url'],
+        'title': data.get('title', None)  # Optional custom title
+    })
+    
+    if response.status_code == 200:
+        return jsonify(response.json())
+    else:
+        return jsonify({'error': 'Download failed'}), 500
+```
+
+## Additional Examples
+
+**YouTube Music podcast:**
+```bash
+curl -X POST http://localhost:8080/convert \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://music.youtube.com/podcast/FLQVlA_DNFU", "title": "Music Podcast Episode"}'
+```
+
+**Spotify URLs will return an error:**
+```bash
+curl -X POST http://localhost:8080/convert \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://open.spotify.com/episode/1mzj7PRdo6Xr4hCxLqf0JK"}'
+# Returns: {"detail":"Spotify episodes cannot be downloaded due to DRM protection..."}
 ```
