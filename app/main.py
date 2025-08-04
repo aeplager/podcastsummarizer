@@ -62,7 +62,13 @@ def _fetch_transcript(video_id: str) -> str:
         # Other errors
         raise HTTPException(status_code=500, detail=f"Transcript error: {str(e)}")
     # Combine transcript text into single string
-    return " ".join(item["text"] for item in transcript_list)
+    # The youtube_transcript_api may return a list of FetchedTranscriptSnippet
+    # objects rather than plain dictionaries. These objects expose the text
+    # content via the ``text`` attribute. The previous implementation attempted
+    # to access the items like dictionaries (``item["text"]``) which raises
+    # ``TypeError: 'FetchedTranscriptSnippet' object is not subscriptable``.
+    # Access the attribute instead so the transcript is combined correctly.
+    return " ".join(item.text for item in transcript_list)
 
 
 def _summarize_text(text: str) -> dict:
