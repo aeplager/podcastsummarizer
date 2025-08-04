@@ -61,8 +61,19 @@ def _fetch_transcript(video_id: str) -> str:
     except Exception as e:
         # Other errors
         raise HTTPException(status_code=500, detail=f"Transcript error: {str(e)}")
-    # Combine transcript text into single string
-    return " ".join(item["text"] for item in transcript_list)
+    # Combine transcript text into a single string.  The YouTubeTranscriptApi
+    # library may return either dictionaries or objects (e.g.,
+    # ``FetchedTranscriptSnippet``) for each transcript segment.  Dictionaries
+    # expose the text under the ``"text"`` key, while objects expose it via a
+    # ``text`` attribute.  Handle both to remain compatible with recent
+    # library versions.
+    parts = []
+    for item in transcript_list:
+        if isinstance(item, dict):
+            parts.append(item.get("text", ""))
+        else:
+            parts.append(getattr(item, "text", ""))
+    return " ".join(parts)
 
 
 def _summarize_text(text: str) -> dict:
