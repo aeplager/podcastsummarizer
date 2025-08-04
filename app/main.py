@@ -17,7 +17,7 @@ app = FastAPI()
 
 class ConvertRequest(BaseModel):
     url: str
-    title: str = None  # Optional custom title for the files
+    title: str | None = None  # Optional custom title for the files
 
 
 class SearchRequest(BaseModel):
@@ -94,8 +94,12 @@ def _summarize_text(text: str) -> dict:
         ],
         temperature=0.3,
     )
+    content = completion.choices[0].message.content
+    json_match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not json_match:
+        raise HTTPException(status_code=500, detail="Failed to parse summary response")
     try:
-        return json.loads(completion.choices[0].message.content)
+        return json.loads(json_match.group(0))
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="Failed to parse summary response")
 
