@@ -55,7 +55,7 @@ def _extract_video_id(url: str) -> str:
 def _fetch_transcript(video_id: str) -> str:
     try:
         # Fetch transcript using YouTubeTranscriptApi
-        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+        transcript_list = YouTubeTranscriptApi().fetch(video_id)
     except NoTranscriptFound:
         raise HTTPException(status_code=404, detail="No transcript found for this video")
     except Exception as e:
