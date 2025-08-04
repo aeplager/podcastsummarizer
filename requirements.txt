@@ -3,3 +3,5 @@ uvicorn[standard]
 spotdl
 yt-dlp
 azure-storage-blob
+openai
+youtube-transcript-api

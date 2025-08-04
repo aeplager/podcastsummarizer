@@ -3,42 +3,29 @@ import re
 import subprocess
 import tempfile
 import json
+import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from azure.storage.blob import BlobServiceClient
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
+from openai import OpenAI
 
 app = FastAPI()
 
 
 class ConvertRequest(BaseModel):
     url: str
-    title: str = None  # Optional custom title for the files
 
 
-class SearchRequest(BaseModel):
-    query: str
-    max_results: int = 10  # Default to 10 results
+class SummarizeRequest(BaseModel):
+    url: str
 
 
-# Support multiple podcast platforms that allow downloads
-SUPPORTED_URL_PATTERNS = [
-    (re.compile(r"^https://www\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)"), "youtube"),
-    (re.compile(r"^https://youtu\.be/([a-zA-Z0-9_-]+)"), "youtube"),
-    (re.compile(r"^https://music\.youtube\.com/podcast/([a-zA-Z0-9_-]+)"), "youtube_music"),
-    (re.compile(r"^https://music\.youtube\.com/watch\?v=([a-zA-Z0-9_-]+)"), "youtube_music"),
-    (re.compile(r"^https://open\.spotify\.com/episode/([a-zA-Z0-9]+)"), "spotify"),
-]
-
-
-def _get_url_info(url):
-    """Extract URL info and platform type"""
-    for pattern, platform in SUPPORTED_URL_PATTERNS:
-        match = pattern.match(url)
-        if match:
-            return match.group(1), platform
-    return None, None
+SPOTIFY_EPISODE_RE = re.compile(r"^https://open\.spotify\.com/episode/([a-zA-Z0-9]+)")
+YOUTUBE_VIDEO_RE = re.compile(r"(?:v=|be/)([\w-]{11})")
 
 
 def _get_container_client():
@@ -53,67 +40,85 @@ def _get_container_client():
     return service.get_container_client(container)
 
 
-def _sanitize_filename(title):
-    """Convert a title to a safe filename"""
-    if not title:
-        return None
-    # Remove invalid characters and replace spaces with underscores
-    sanitized = re.sub(r'[<>:"/\\|?*]', '', title)
-    sanitized = re.sub(r'\s+', '_', sanitized.strip())
-    # Limit length to avoid filesystem issues
-    return sanitized[:100] if sanitized else None
+def _extract_video_id(url: str) -> str:
+    match = YOUTUBE_VIDEO_RE.search(url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid YouTube URL")
+    return match.group(1)
 
 
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
-
-
-@app.post("/search")
-def search_podcasts(req: SearchRequest):
-    """Search YouTube for podcasts/videos by title"""
+def _fetch_transcript(video_id: str) -> str:
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Use yt-dlp to search YouTube and extract metadata without downloading
-            cmd = [
-                "yt-dlp", 
-                f"ytsearch{req.max_results}:{req.query}",
-                "--dump-json",
-                "--no-download"
-            ]
-            
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            
-            # Parse the JSON output - each line is a separate JSON object
-            search_results = []
-            for line in result.stdout.strip().split('\n'):
-                if line:
-                    try:
-                        import json
-                        video_info = json.loads(line)
-                        search_results.append({
-                            "title": video_info.get("title", "Unknown Title"),
-                            "url": video_info.get("webpage_url", ""),
-                            "duration": video_info.get("duration_string", "Unknown"),
-                            "channel": video_info.get("uploader", "Unknown Channel"),
-                            "view_count": video_info.get("view_count", 0),
-                            "upload_date": video_info.get("upload_date", "Unknown"),
-                            "description": video_info.get("description", "")[:200] + "..." if video_info.get("description", "") else ""
-                        })
-                    except json.JSONDecodeError:
-                        continue
-            
-            return {
-                "query": req.query,
-                "results_count": len(search_results),
-                "results": search_results
-            }
-            
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr if exc.stderr else ""
-        raise HTTPException(status_code=500, detail=f"Search failed: {stderr}")
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Search error: {str(exc)}")
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+    except NoTranscriptFound:
+        raise HTTPException(status_code=404, detail="Transcript not found")
+    return " ".join(t["text"] for t in transcript)
+
+
+def _summarize_text(text: str) -> dict:
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="Missing OpenAI API key")
+    client = OpenAI(api_key=api_key)
+    prompt = (
+        "Summarize the following transcript. Return JSON with keys 'bullet_points' "
+        "(list of bullet point strings) and 'companies' (list of objects with 'name' "
+        "and 'summary'). Transcript:\n"
+    )
+    completion = client.chat.completions.create(
+        model="gpt-3.5-turbo",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": prompt + text},
+        ],
+        temperature=0.3,
+    )
+    try:
+        return json.loads(completion.choices[0].message.content)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="Failed to parse summary response")
+
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    return """
+    <html>
+      <body>
+        <h1>YouTube Summarizer</h1>
+        <form id='form'>
+          <input type='text' id='url' placeholder='YouTube URL' size='50'/>
+          <button type='submit'>Summarize</button>
+        </form>
+        <div id='result'></div>
+        <script>
+        const form=document.getElementById('form');
+        form.addEventListener('submit', async (e)=>{
+          e.preventDefault();
+          const url=document.getElementById('url').value;
+          const resp=await fetch('/summarize', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({url})});
+          const data=await resp.json();
+          let html='<h2>Summary</h2><ul>';
+          for(const bp of data.bullet_points){html+=`<li>${bp}</li>`;}
+          html+='</ul>';
+          if(data.companies && data.companies.length){
+            html+='<h2>Companies</h2><ul>';
+            for(const c of data.companies){html+=`<li><strong>${c.name}</strong>: ${c.summary}</li>`;}
+            html+='</ul>';
+          }
+          document.getElementById('result').innerHTML=html;
+        });
+        </script>
+      </body>
+    </html>
+    """
+
+
+@app.post("/summarize")
+def summarize(req: SummarizeRequest):
+    video_id = _extract_video_id(req.url)
+    transcript = _fetch_transcript(video_id)
+    result = _summarize_text(transcript)
+    return result
 
 
 @app.post("/convert")
