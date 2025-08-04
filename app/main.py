@@ -3,11 +3,10 @@ import re
 import subprocess
 import tempfile
 import json
-import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse, Response
 from pydantic import BaseModel
 from azure.storage.blob import BlobServiceClient
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound
@@ -55,13 +54,15 @@ def _extract_video_id(url: str) -> str:
 
 def _fetch_transcript(video_id: str) -> str:
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-    except ImportError:
-        raise HTTPException(status_code=500, detail="youtube_transcript_api not available")
+        # Fetch transcript using YouTubeTranscriptApi
+        transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
+    except NoTranscriptFound:
+        raise HTTPException(status_code=404, detail="No transcript found for this video")
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Transcript not found: {str(e)}")
-    return " ".join(t["text"] for t in transcript)
+        # Other errors
+        raise HTTPException(status_code=500, detail=f"Transcript error: {str(e)}")
+    # Combine transcript text into single string
+    return " ".join(item["text"] for item in transcript_list)
 
 
 def _summarize_text(text: str) -> dict:
@@ -107,20 +108,20 @@ def _get_url_info(url):
     return None, None
 
 
-def _sanitize_filename(title):
-    """Convert a title to a safe filename"""
-    if not title:
+def _sanitize_filename(filename):
+    """Sanitize filename for safe storage"""
+    if not filename:
         return None
-    # Remove invalid characters and replace spaces with underscores
-    sanitized = re.sub(r'[<>:"/\\|?*]', '', title)
-    sanitized = re.sub(r'\s+', '_', sanitized.strip())
-    # Limit length to avoid filesystem issues
-    return sanitized[:100] if sanitized else None
+    # Remove or replace invalid characters
+    import re
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', filename)
+    # Limit length
+    return sanitized[:100]
 
 
-@app.get("/", response_class=HTMLResponse)
-def index():
-    return """
+@app.get("/")
+def read_root():
+    return HTMLResponse(content="""
     <!DOCTYPE html>
     <html lang="en">
       <head>
@@ -486,7 +487,45 @@ def index():
         </script>
       </body>
     </html>
-    """
+    """)
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "service": "Podcast & Video Service"}
+
+
+@app.get("/download/{filename}")
+def download_file(filename: str):
+    """Download files directly from Azure storage and serve to user"""
+    try:
+        container_client = _get_container_client()
+        
+        # Download the blob to memory
+        blob_client = container_client.get_blob_client(filename)
+        blob_data = blob_client.download_blob().readall()
+        
+        # Determine content type based on file extension
+        if filename.endswith('.mp3'):
+            media_type = 'audio/mpeg'
+            disposition = f'attachment; filename="{filename}"'
+        elif filename.endswith('.vtt'):
+            media_type = 'text/vtt'
+            disposition = f'attachment; filename="{filename}"'
+        elif filename.endswith('.srt'):
+            media_type = 'text/plain'
+            disposition = f'attachment; filename="{filename}"'
+        else:
+            media_type = 'application/octet-stream'
+            disposition = f'attachment; filename="{filename}"'
+        
+        return Response(
+            content=blob_data,
+            media_type=media_type,
+            headers={"Content-Disposition": disposition}
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"File not found: {str(exc)}")
 
 
 @app.post("/search")
@@ -545,111 +584,110 @@ def summarize(req: SummarizeRequest):
 
 @app.post("/convert")
 def convert(req: ConvertRequest):
-    episode_id, platform = _get_url_info(req.url)
-    if not episode_id:
-        raise HTTPException(status_code=400, detail="Unsupported URL format. Supported: YouTube, YouTube Music")
-    
-    # Warn about Spotify limitations
-    if platform == "spotify":
-        raise HTTPException(
-            status_code=400, 
-            detail="Spotify episodes cannot be downloaded due to DRM protection. Please use YouTube or other supported platforms."
-        )
-
-    # Determine filename base - use custom title if provided, otherwise video ID
-    sanitized_title = _sanitize_filename(req.title)
-    filename_base = sanitized_title if sanitized_title else episode_id
-
     try:
-        container_client = _get_container_client()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+        episode_id, platform = _get_url_info(req.url)
+        if not episode_id:
+            raise HTTPException(status_code=400, detail="Unsupported URL format. Supported: YouTube, YouTube Music")
+        
+        # Warn about Spotify limitations
+        if platform == "spotify":
+            raise HTTPException(
+                status_code=400, 
+                detail="Spotify episodes cannot be downloaded due to DRM protection. Please use YouTube or other supported platforms."
+            )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Handle different URL types with appropriate yt-dlp options
-        if platform == "youtube_music":
-            # For YouTube Music, try to get the latest episode from the podcast
-            cmd = ["yt-dlp", req.url, "-o", f"{tmpdir}/%(title)s.%(ext)s", 
-                   "--extract-audio", "--audio-format", "mp3", 
-                   "--playlist-end", "1", "--yes-playlist",
-                   "--write-subs", "--write-auto-subs", "--sub-lang", "en"]
-        else:
-            # For regular YouTube videos - only download the specific video, not the playlist
-            cmd = ["yt-dlp", req.url, "-o", f"{tmpdir}/%(title)s.%(ext)s", 
-                   "--extract-audio", "--audio-format", "mp3", "--no-playlist",
-                   "--write-subs", "--write-auto-subs", "--sub-lang", "en"]
-                   
+        # Determine filename base - use custom title if provided, otherwise video ID
+        sanitized_title = _sanitize_filename(req.title)
+        filename_base = sanitized_title if sanitized_title else episode_id
+
         try:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr if exc.stderr else ""
-            stdout = exc.stdout if exc.stdout else ""
-            raise HTTPException(status_code=500, detail=f"Download failed: {stderr}\nStdout: {stdout}")
-
-        # List all files in the directory for debugging
-        all_files = list(Path(tmpdir).iterdir())
-        mp3_files = list(Path(tmpdir).glob("*.mp3"))
-        
-        # Look for transcription files (subtitles)
-        subtitle_files = list(Path(tmpdir).glob("*.vtt")) + list(Path(tmpdir).glob("*.srt"))
-        
-        # Also capture what the downloader actually output for debugging
-        stdout_output = result.stdout if result.stdout else "No stdout output"
-        
-        if not mp3_files:
-            # If no MP3 files, check for other audio files
-            audio_files = list(Path(tmpdir).glob("*.m4a")) + list(Path(tmpdir).glob("*.ogg")) + list(Path(tmpdir).glob("*.wav"))
-            if audio_files:
-                downloaded = audio_files[0]
-            else:
-                file_list = [f.name for f in all_files]
-                raise HTTPException(status_code=500, detail=f"No audio files found after download. Files in directory: {file_list}. Downloader output: {stdout_output}")
-        else:
-            downloaded = mp3_files[0]
-            
-        # Prepare audio file
-        final_audio_path = Path(tmpdir) / f"{filename_base}.mp3"
-        downloaded.rename(final_audio_path)
-
-        # Upload audio file
-        audio_blob_name = f"{filename_base}.mp3"
-        try:
-            with open(final_audio_path, "rb") as data:
-                container_client.upload_blob(name=audio_blob_name, data=data, overwrite=True)
+            container_client = _get_container_client()
+        except HTTPException:
+            raise
         except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Audio upload failed: {exc}")
+            raise HTTPException(status_code=500, detail=f"Azure Storage connection failed: {str(exc)}")
 
-        # Handle transcription file if available
-        transcript_blob_name = None
-        transcript_url = None
-        
-        if subtitle_files:
-            subtitle_file = subtitle_files[0]  # Use the first subtitle file found
-            final_transcript_path = Path(tmpdir) / f"{filename_base}.{subtitle_file.suffix}"
-            subtitle_file.rename(final_transcript_path)
-            
-            transcript_blob_name = f"{filename_base}{subtitle_file.suffix}"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Handle different URL types with appropriate yt-dlp options
+            if platform == "youtube_music":
+                # For YouTube Music, try to get the latest episode from the podcast
+                cmd = ["yt-dlp", req.url, "-o", f"{tmpdir}/%(title)s.%(ext)s", 
+                       "--extract-audio", "--audio-format", "mp3", 
+                       "--playlist-end", "1", "--yes-playlist",
+                       "--write-subs", "--write-auto-subs", "--sub-lang", "en"]
+            else:
+                # For regular YouTube videos - only download the specific video, not the playlist
+                cmd = ["yt-dlp", req.url, "-o", f"{tmpdir}/%(title)s.%(ext)s", 
+                       "--extract-audio", "--audio-format", "mp3", "--no-playlist",
+                       "--write-subs", "--write-auto-subs", "--sub-lang", "en"]
+                       
             try:
-                with open(final_transcript_path, "rb") as data:
-                    container_client.upload_blob(name=transcript_blob_name, data=data, overwrite=True)
-                
-                transcript_url = (
-                    f"https://{os.getenv('AZURE_STORAGE_ACCOUNT')}.blob.core.windows.net/"
-                    f"{os.getenv('AZURE_CONTAINER_NAME')}/{transcript_blob_name}"
-                )
-            except Exception as exc:
-                # Don't fail the whole request if transcript upload fails
-                transcript_url = f"Transcript upload failed: {exc}"
+                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr if exc.stderr else ""
+                stdout = exc.stdout if exc.stdout else ""
+                raise HTTPException(status_code=500, detail=f"Download failed: {stderr}\nStdout: {stdout}")
 
-    audio_url = (
-        f"https://{os.getenv('AZURE_STORAGE_ACCOUNT')}.blob.core.windows.net/"
-        f"{os.getenv('AZURE_CONTAINER_NAME')}/{audio_blob_name}"
-    )
-    
-    response = {"audio_url": audio_url}
-    if transcript_url:
-        response["transcript_url"] = transcript_url
-    
-    return response
+            # List all files in the directory for debugging
+            all_files = list(Path(tmpdir).iterdir())
+            mp3_files = list(Path(tmpdir).glob("*.mp3"))
+            
+            # Look for transcription files (subtitles)
+            subtitle_files = list(Path(tmpdir).glob("*.vtt")) + list(Path(tmpdir).glob("*.srt"))
+            
+            # Also capture what the downloader actually output for debugging
+            stdout_output = result.stdout if result.stdout else "No stdout output"
+            
+            if not mp3_files:
+                # If no MP3 files, check for other audio files
+                audio_files = list(Path(tmpdir).glob("*.m4a")) + list(Path(tmpdir).glob("*.ogg")) + list(Path(tmpdir).glob("*.wav"))
+                if audio_files:
+                    downloaded = audio_files[0]
+                else:
+                    file_list = [f.name for f in all_files]
+                    raise HTTPException(status_code=500, detail=f"No audio files found after download. Files in directory: {file_list}. Downloader output: {stdout_output}")
+            else:
+                downloaded = mp3_files[0]
+                
+            # Prepare audio file
+            final_audio_path = Path(tmpdir) / f"{filename_base}.mp3"
+            downloaded.rename(final_audio_path)
+
+            # Upload audio file
+            audio_blob_name = f"{filename_base}.mp3"
+            try:
+                with open(final_audio_path, "rb") as data:
+                    container_client.upload_blob(name=audio_blob_name, data=data, overwrite=True)
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Audio upload failed: {exc}")
+
+            # Handle transcription file if available
+            transcript_blob_name = None
+            transcript_url = None
+            
+            if subtitle_files:
+                subtitle_file = subtitle_files[0]  # Use the first subtitle file found
+                final_transcript_path = Path(tmpdir) / f"{filename_base}.{subtitle_file.suffix}"
+                subtitle_file.rename(final_transcript_path)
+                
+                transcript_blob_name = f"{filename_base}{subtitle_file.suffix}"
+                try:
+                    with open(final_transcript_path, "rb") as data:
+                        container_client.upload_blob(name=transcript_blob_name, data=data, overwrite=True)
+                    
+                    transcript_url = f"/download/{transcript_blob_name}"
+                except Exception as exc:
+                    # Don't fail the whole request if transcript upload fails
+                    transcript_url = None
+
+        audio_url = f"/download/{audio_blob_name}"
+        
+        response = {"audio_url": audio_url}
+        if transcript_url:
+            response["transcript_url"] = transcript_url
+        
+        return response
+
+    except Exception as exc:
+        # Catch any unexpected errors
+        raise HTTPException(status_code=500, detail=f"Unexpected error during conversion: {str(exc)}")

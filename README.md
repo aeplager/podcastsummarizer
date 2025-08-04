@@ -1,13 +1,15 @@
-# Podcast Downloader Service
+# Podcast & Video Service
 
-This service exposes an HTTP endpoint to download podcast episodes as MP3 files and transcriptions, uploading them to Azure Blob Storage.
+This service provides a comprehensive solution for downloading podcast episodes as MP3 files, extracting transcriptions, and generating AI-powered summaries. All content is uploaded to Azure Blob Storage with a beautiful web interface.
 
 **Features:**
-- Downloads audio in MP3 format
-- Extracts transcriptions/subtitles when available
-- Uploads both to Azure Blob Storage
-- Returns URLs for both audio and transcript files
-- Optional custom file naming for better organization
+- 🔍 **Search YouTube** for podcasts and videos by title
+- 📥 **Download audio** in MP3 format with custom naming
+- 📝 **Extract transcriptions** in VTT format when available
+- 🤖 **AI-powered summaries** with bullet points and company mentions
+- ☁️ **Azure Blob Storage** integration for file hosting
+- 🎨 **Modern web interface** with Bootstrap and real-time status
+- 🔗 **REST API** compatible with Flask and other applications
 
 **Supported platforms:**
 - YouTube (podcasts and videos)
@@ -56,6 +58,34 @@ Search YouTube for podcasts/videos by title before downloading.
 }
 ```
 
+### Summarize Endpoint
+`POST /summarize`
+
+Generate AI-powered summaries of YouTube videos with bullet points and company mentions.
+
+**Request Body:**
+```json
+{
+  "url": "https://www.youtube.com/watch?v=..."
+}
+```
+
+**Response:**
+```json
+{
+  "bullet_points": [
+    "Key point 1 from the video",
+    "Key point 2 from the video"
+  ],
+  "companies": [
+    {
+      "name": "Company Name",
+      "summary": "Brief description of company's involvement"
+    }
+  ]
+}
+```
+
 ### Convert Endpoint
 `POST /convert`
 
@@ -87,6 +117,13 @@ Returns a simple health check response.
 curl -X POST http://localhost:8080/search \
      -H "Content-Type: application/json" \
      -d '{"query": "Latent Space podcast", "max_results": 5}'
+```
+
+**Generate AI summary:**
+```bash
+curl -X POST http://localhost:8080/summarize \
+     -H "Content-Type: application/json" \
+     -d '{"url": "https://www.youtube.com/watch?v=FLQVlA_DNFU"}'
 ```
 
 **Basic usage with auto-generated filename:**
