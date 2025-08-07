@@ -21,7 +21,8 @@ This service provides a comprehensive solution for downloading podcast episodes 
 ## Building and Running
 
 ```powershell
-docker rm podcastsummarizer ; docker build -t podcastsummarizer . ; if ($LASTEXITCODE -eq 0) { docker run --env-file .env -p 8080:8080 podcastsummarizer }
+docker rm podcastsummarizer ; docker build -t podcastsummarizer . ; if ($LASTEXITCODE -eq 0) { docker run --env-file .env -p 8080:8080 --name podcastsummarizer podcastsummarizer }
+
 ```
 
 ## API Endpoints
